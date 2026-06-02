@@ -90,17 +90,22 @@ async def transcribe_with_claude(audio_bytes: bytes, mime_type: str, language: s
     }
 
     async with httpx.AsyncClient(timeout=120) as client:
-        resp = await client.post(
-            "https://api.anthropic.com/v1/messages",
-            json=payload,
-            headers={
-                "x-api-key": ANTHROPIC_API_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-        )
-        resp.raise_for_status()
-        data = resp.json()
+        try:
+            resp = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                json=payload,
+                headers={
+                    "x-api-key": ANTHROPIC_API_KEY,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Claude API error: {e.response.status_code}")
+            logger.error(f"Response body: {e.response.text}")
+            raise
 
     for block in data.get("content", []):
         if block.get("type") == "text":
@@ -232,6 +237,8 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     try:
         audio_bytes = await download_telegram_file(file_id, context)
+        logger.info(f"Файл скачан, размер: {len(audio_bytes)} байт")
+        
         text = await transcribe_with_claude(audio_bytes, mime_type, language)
 
         # Telegram ограничивает сообщение 4096 символами
@@ -244,11 +251,13 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 await msg.reply_text(text[i:i + 4000])
 
     except httpx.HTTPStatusError as e:
-        logger.error("Claude API error: %s", e.response.text)
-        await status_msg.edit_text(f"❌ Ошибка Claude API: {e.response.status_code}")
+        logger.error(f"Claude API error: {e.response.status_code}")
+        logger.error(f"Response: {e.response.text}")
+        error_detail = e.response.text[:200] if e.response.text else "Неизвестная ошибка"
+        await status_msg.edit_text(f"❌ Ошибка Claude API: {e.response.status_code}\n\n`{error_detail}`", parse_mode="Markdown")
     except Exception as e:
         logger.exception("Unexpected error")
-        await status_msg.edit_text(f"❌ Ошибка: {e}")
+        await status_msg.edit_text(f"❌ Ошибка: {str(e)[:200]}")
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
