@@ -1,18 +1,13 @@
 """
-Telegram-бот для транскрибации аудио
+Telegram-бот для транскрибации аудио через Groq Whisper API
 Поддерживает: голосовые сообщения, аудио файлы, видео, видеосообщения (кружки)
-
-Комбо-решение:
-- Google Speech-to-Text для узбекского (лучшее качество)
-- Groq Whisper для остальных языков (быстро и бесплатно)
+ПОЛНОСТЬЮ БЕСПЛАТНО!
 """
 
 import os
 import logging
 import tempfile
 import httpx
-import json
-from google.cloud import speech_v1
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -34,7 +29,6 @@ logger = logging.getLogger(__name__)
 try:
     TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
     GROQ_API_KEY = os.environ["GROQ_API_KEY"]
-    GOOGLE_APPLICATION_CREDENTIALS = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
 except KeyError as e:
     logger.error(f"Ошибка: отсутствует переменная окружения {e}")
     raise
@@ -51,19 +45,6 @@ LANGUAGES = {
     "zh":   "🇨🇳 中文",
     "ar":   "🇸🇦 العربية",
     "ko":   "🇰🇷 한국어",
-}
-
-# Маппинг языков для Google Speech-to-Text
-GOOGLE_LANGUAGE_CODES = {
-    "uz": "uz-UZ",  # Узбекский
-    "ru": "ru-RU",  # Русский
-    "en": "en-US",  # Английский
-    "fr": "fr-FR",  # Французский
-    "de": "de-DE",  # Немецкий
-    "es": "es-ES",  # Испанский
-    "zh": "zh-CN",  # Китайский
-    "ar": "ar-SA",  # Арабский
-    "ko": "ko-KR",  # Корейский
 }
 
 # Маппинг языков для Groq Whisper
@@ -83,35 +64,6 @@ GROQ_LANGUAGE_CODES = {
 user_language: dict[int, str] = {}
 
 
-# ─── Google Speech-to-Text API ────────────────────────────────────────────────
-async def transcribe_with_google(audio_bytes: bytes, language: str) -> str:
-    """Транскрибирует аудио используя Google Speech-to-Text API."""
-    
-    lang_code = GOOGLE_LANGUAGE_CODES.get(language, "uz-UZ")
-    
-    try:
-        client = speech_v1.SpeechClient()
-        audio = speech_v1.RecognitionAudio(content=audio_bytes)
-        config = speech_v1.RecognitionConfig(
-            encoding=speech_v1.RecognitionConfig.AudioEncoding.OGG_OPUS,
-            language_code=lang_code,
-            enable_automatic_punctuation=True,
-        )
-        
-        response = client.recognize(config=config, audio=audio)
-        
-        text = ""
-        for result in response.results:
-            for alternative in result.alternatives:
-                text += alternative.transcript + " "
-        
-        return text.strip() or "(пустой результат)"
-        
-    except Exception as e:
-        logger.error(f"Google Speech-to-Text error: {str(e)}")
-        raise
-
-
 # ─── Groq Whisper API ─────────────────────────────────────────────────────────
 async def transcribe_with_groq(audio_bytes: bytes, file_name: str, language: str) -> str:
     """Транскрибирует аудио используя Groq Whisper API (БЕСПЛАТНО!)."""
@@ -123,7 +75,7 @@ async def transcribe_with_groq(audio_bytes: bytes, file_name: str, language: str
             # Подготавливаем multipart form data
             files = {
                 "file": (file_name or "audio.ogg", audio_bytes, "audio/ogg"),
-                "model": (None, "whisper-large-v3"),
+                "model": (None, "whisper-large-v3-turbo"),
             }
             
             # Если язык не автоматический, добавляем его
@@ -146,23 +98,6 @@ async def transcribe_with_groq(audio_bytes: bytes, file_name: str, language: str
             raise
 
     return data.get("text", "(пустой результат)").strip()
-
-
-# ─── Выбор API в зависимости от языка ─────────────────────────────────────────
-async def transcribe_audio(audio_bytes: bytes, file_name: str, language: str) -> str:
-    """
-    Выбирает оптимальный API для транскрибации в зависимости от языка.
-    
-    - Узбекский (uz) → Google Speech-to-Text (лучшее качество)
-    - Остальные → Groq Whisper (быстро и бесплатно)
-    """
-    
-    if language == "uz":
-        logger.info("Используется Google Speech-to-Text для узбекского")
-        return await transcribe_with_google(audio_bytes, language)
-    else:
-        logger.info(f"Используется Groq Whisper для языка {language}")
-        return await transcribe_with_groq(audio_bytes, file_name, language)
 
 
 # ─── Скачивание файла из Telegram ─────────────────────────────────────────────
@@ -270,7 +205,7 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         audio_bytes = await download_telegram_file(file_id, context)
         logger.info(f"Файл скачан, размер: {len(audio_bytes)} байт")
         
-        text = await transcribe_audio(audio_bytes, file_name, language)
+        text = await transcribe_with_groq(audio_bytes, file_name, language)
 
         # Telegram ограничивает сообщение 4096 символами
         if len(text) <= 4000:
@@ -283,10 +218,24 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
         logger.info(f"Успешно транскрибировано {len(text)} символов")
 
+    except httpx.HTTPStatusError as e:
+        logger.error(f"Groq Whisper API error: {e.response.status_code}")
+        logger.error(f"Response: {e.response.text}")
+        
+        # Парсим ошибку от Groq
+        try:
+            error_data = e.response.json()
+            error_msg = error_data.get("error", {}).get("message", "Неизвестная ошибка")
+        except:
+            error_msg = e.response.text[:200] if e.response.text else "Неизвестная ошибка"
+        
+        await status_msg.edit_text(
+            f"❌ Ошибка: {e.response.status_code}\n\n`{error_msg}`",
+            parse_mode="Markdown"
+        )
     except Exception as e:
-        logger.error(f"Ошибка транскрибации: {str(e)}")
-        error_msg = str(e)[:200]
-        await status_msg.edit_text(f"❌ Ошибка: {error_msg}")
+        logger.exception("Unexpected error")
+        await status_msg.edit_text(f"❌ Ошибка: {str(e)[:200]}")
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -331,7 +280,7 @@ def main() -> None:
     # 4. Обработчик текстовых сообщений (в конце!)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    logger.info("🎙 Бот транскрибации запущен (Комбо: Google + Groq). Polling...")
+    logger.info("🎙 Бот транскрибации запущен (Groq - БЕСПЛАТНО!). Polling...")
     app.run_polling(drop_pending_updates=True)
 
 
