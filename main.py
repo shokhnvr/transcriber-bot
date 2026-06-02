@@ -1,11 +1,10 @@
 """
-Telegram-бот для транскрибации аудио через Claude API
+Telegram-бот для транскрибации аудио через OpenAI Whisper API
 Поддерживает: голосовые сообщения, аудио файлы, видео, видеосообщения (кружки)
 """
 
 import os
 import logging
-import base64
 import tempfile
 import httpx
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -28,7 +27,7 @@ logger = logging.getLogger(__name__)
 # ─── Переменные окружения ─────────────────────────────────────────────────────
 try:
     TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
-    ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
+    OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 except KeyError as e:
     logger.error(f"Ошибка: отсутствует переменная окружения {e}")
     raise
@@ -43,7 +42,7 @@ LANGUAGES = {
     "de":   "🇩🇪 Deutsch",
     "es":   "🇪🇸 Español",
     "zh":   "🇨🇳 中文",
-    "ar":   "🇸🇦 Arabic",
+    "ar":   "🇸🇦 العربية",
     "ko":   "🇰🇷 한국어",
 }
 
@@ -51,67 +50,40 @@ LANGUAGES = {
 user_language: dict[int, str] = {}
 
 
-# ─── Claude API ───────────────────────────────────────────────────────────────
-async def transcribe_with_claude(audio_bytes: bytes, mime_type: str, language: str) -> str:
-    lang_name = LANGUAGES.get(language, language)
-    if language == "auto":
-        lang_instruction = "Detect the language automatically."
-    else:
-        lang_instruction = f"The audio is in {lang_name}. Transcribe accordingly."
-
-    audio_b64 = base64.b64encode(audio_bytes).decode()
-
-    payload = {
-        "model": "claude-sonnet-4-20250514",
-        "max_tokens": 4096,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "document",
-                        "source": {
-                            "type": "base64",
-                            "media_type": mime_type,
-                            "data": audio_b64,
-                        },
-                    },
-                    {
-                        "type": "text",
-                        "text": (
-                            f"Transcribe the audio content exactly as spoken. "
-                            f"{lang_instruction} "
-                            f"Return only the transcription text, no commentary or labels."
-                        ),
-                    },
-                ],
-            }
-        ],
-    }
-
+# ─── OpenAI Whisper API ───────────────────────────────────────────────────────
+async def transcribe_with_whisper(audio_bytes: bytes, file_name: str, language: str) -> str:
+    """Транскрибирует аудио используя OpenAI Whisper API."""
+    
+    lang_code = language if language != "auto" else None
+    
     async with httpx.AsyncClient(timeout=120) as client:
         try:
+            # Подготавливаем multipart form data
+            files = {
+                "file": (file_name or "audio.ogg", audio_bytes, "audio/ogg"),
+                "model": (None, "whisper-1"),
+            }
+            
+            # Если язык не автоматический, добавляем его
+            if lang_code and lang_code != "auto":
+                files["language"] = (None, lang_code)
+            
             resp = await client.post(
-                "https://api.anthropic.com/v1/messages",
-                json=payload,
+                "https://api.openai.com/v1/audio/transcriptions",
+                files=files,
                 headers={
-                    "x-api-key": ANTHROPIC_API_KEY,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json",
+                    "Authorization": f"Bearer {OPENAI_API_KEY}",
                 },
             )
             resp.raise_for_status()
             data = resp.json()
+            
         except httpx.HTTPStatusError as e:
-            logger.error(f"Claude API error: {e.response.status_code}")
+            logger.error(f"OpenAI Whisper API error: {e.response.status_code}")
             logger.error(f"Response body: {e.response.text}")
             raise
 
-    for block in data.get("content", []):
-        if block.get("type") == "text":
-            return block["text"].strip()
-
-    return "(пустой результат)"
+    return data.get("text", "(пустой результат)").strip()
 
 
 # ─── Скачивание файла из Telegram ─────────────────────────────────────────────
@@ -123,24 +95,12 @@ async def download_telegram_file(file_id: str, context: ContextTypes.DEFAULT_TYP
             return f.read()
 
 
-# ─── Определение MIME типа ────────────────────────────────────────────────────
-def get_mime_type(file_name: str | None, default: str = "audio/ogg") -> str:
-    if not file_name:
-        return default
-    ext = file_name.rsplit(".", 1)[-1].lower()
-    mapping = {
-        "ogg":  "audio/ogg",
-        "oga":  "audio/ogg",
-        "mp3":  "audio/mpeg",
-        "wav":  "audio/wav",
-        "flac": "audio/flac",
-        "m4a":  "audio/mp4",
-        "aac":  "audio/aac",
-        "mp4":  "video/mp4",
-        "webm": "video/webm",
-        "mov":  "video/quicktime",
-    }
-    return mapping.get(ext, default)
+# ─── Определение имени файла ──────────────────────────────────────────────────
+def get_file_name(file_name: str | None, default: str = "audio.ogg") -> str:
+    """Возвращает имя файла с правильным расширением."""
+    if file_name:
+        return file_name
+    return default
 
 
 # ─── Клавиатура выбора языка ──────────────────────────────────────────────────
@@ -164,12 +124,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик команды /start"""
     logger.info(f"Команда /start от {update.effective_user.id}")
     await update.message.reply_text(
-        "🎙 *Бот транскрибации*\n\n"
+        "🎙 *Бот транскрибации Whisper*\n\n"
         "Отправьте голосовое сообщение, аудио файл, видео или кружок — "
         "и я верну текст.\n\n"
         "Команды:\n"
         "/lang — выбрать язык\n"
-        "/start — это сообщение",
+        "/start — это сообщение\n\n"
+        "💡 Используется OpenAI Whisper API — лучшее качество!",
         parse_mode="Markdown",
     )
 
@@ -211,24 +172,24 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # Определяем источник
     if msg.voice:
         file_id   = msg.voice.file_id
-        mime_type = "audio/ogg"
         label     = "голосовое сообщение"
+        file_name = "voice.ogg"
     elif msg.audio:
         file_id   = msg.audio.file_id
-        mime_type = get_mime_type(msg.audio.file_name, "audio/mpeg")
         label     = msg.audio.file_name or "аудио файл"
+        file_name = msg.audio.file_name or "audio.ogg"
     elif msg.video:
         file_id   = msg.video.file_id
-        mime_type = get_mime_type(msg.video.file_name, "video/mp4")
         label     = msg.video.file_name or "видео"
+        file_name = msg.video.file_name or "video.mp4"
     elif msg.video_note:
         file_id   = msg.video_note.file_id
-        mime_type = "video/mp4"
         label     = "видеосообщение"
+        file_name = "video.mp4"
     elif msg.document:
         file_id   = msg.document.file_id
-        mime_type = get_mime_type(msg.document.file_name, msg.document.mime_type or "audio/ogg")
         label     = msg.document.file_name or "файл"
+        file_name = msg.document.file_name or "file.ogg"
     else:
         await msg.reply_text("⚠️ Не удалось распознать тип файла.")
         return
@@ -239,7 +200,7 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         audio_bytes = await download_telegram_file(file_id, context)
         logger.info(f"Файл скачан, размер: {len(audio_bytes)} байт")
         
-        text = await transcribe_with_claude(audio_bytes, mime_type, language)
+        text = await transcribe_with_whisper(audio_bytes, file_name, language)
 
         # Telegram ограничивает сообщение 4096 символами
         if len(text) <= 4000:
@@ -250,11 +211,23 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             for i in range(0, len(text), 4000):
                 await msg.reply_text(text[i:i + 4000])
 
+        logger.info(f"Успешно транскрибировано {len(text)} символов")
+
     except httpx.HTTPStatusError as e:
-        logger.error(f"Claude API error: {e.response.status_code}")
+        logger.error(f"OpenAI Whisper API error: {e.response.status_code}")
         logger.error(f"Response: {e.response.text}")
-        error_detail = e.response.text[:200] if e.response.text else "Неизвестная ошибка"
-        await status_msg.edit_text(f"❌ Ошибка Claude API: {e.response.status_code}\n\n`{error_detail}`", parse_mode="Markdown")
+        
+        # Парсим ошибку от OpenAI
+        try:
+            error_data = e.response.json()
+            error_msg = error_data.get("error", {}).get("message", "Неизвестная ошибка")
+        except:
+            error_msg = e.response.text[:200] if e.response.text else "Неизвестная ошибка"
+        
+        await status_msg.edit_text(
+            f"❌ Ошибка OpenAI Whisper: {e.response.status_code}\n\n`{error_msg}`",
+            parse_mode="Markdown"
+        )
     except Exception as e:
         logger.exception("Unexpected error")
         await status_msg.edit_text(f"❌ Ошибка: {str(e)[:200]}")
@@ -302,7 +275,7 @@ def main() -> None:
     # 4. Обработчик текстовых сообщений (в конце!)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    logger.info("Бот запущен. Polling...")
+    logger.info("🎙 Бот транскрибации запущен (Whisper API). Polling...")
     app.run_polling(drop_pending_updates=True)
 
 
