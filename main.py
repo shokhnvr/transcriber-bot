@@ -1,6 +1,7 @@
 """
-Telegram-бот для транскрибации аудио через OpenAI Whisper API
+Telegram-бот для транскрибации аудио через Groq Whisper API
 Поддерживает: голосовые сообщения, аудио файлы, видео, видеосообщения (кружки)
+ПОЛНОСТЬЮ БЕСПЛАТНО!
 """
 
 import os
@@ -27,7 +28,7 @@ logger = logging.getLogger(__name__)
 # ─── Переменные окружения ─────────────────────────────────────────────────────
 try:
     TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
-    OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
+    GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 except KeyError as e:
     logger.error(f"Ошибка: отсутствует переменная окружения {e}")
     raise
@@ -50,9 +51,9 @@ LANGUAGES = {
 user_language: dict[int, str] = {}
 
 
-# ─── OpenAI Whisper API ───────────────────────────────────────────────────────
-async def transcribe_with_whisper(audio_bytes: bytes, file_name: str, language: str) -> str:
-    """Транскрибирует аудио используя OpenAI Whisper API."""
+# ─── Groq Whisper API ─────────────────────────────────────────────────────────
+async def transcribe_with_groq(audio_bytes: bytes, file_name: str, language: str) -> str:
+    """Транскрибирует аудио используя Groq Whisper API (БЕСПЛАТНО!)."""
     
     lang_code = language if language != "auto" else None
     
@@ -61,7 +62,7 @@ async def transcribe_with_whisper(audio_bytes: bytes, file_name: str, language: 
             # Подготавливаем multipart form data
             files = {
                 "file": (file_name or "audio.ogg", audio_bytes, "audio/ogg"),
-                "model": (None, "whisper-1"),
+                "model": (None, "whisper-large-v3-turbo"),
             }
             
             # Если язык не автоматический, добавляем его
@@ -69,17 +70,17 @@ async def transcribe_with_whisper(audio_bytes: bytes, file_name: str, language: 
                 files["language"] = (None, lang_code)
             
             resp = await client.post(
-                "https://api.openai.com/v1/audio/transcriptions",
+                "https://api.groq.com/openai/v1/audio/transcriptions",
                 files=files,
                 headers={
-                    "Authorization": f"Bearer {OPENAI_API_KEY}",
+                    "Authorization": f"Bearer {GROQ_API_KEY}",
                 },
             )
             resp.raise_for_status()
             data = resp.json()
             
         except httpx.HTTPStatusError as e:
-            logger.error(f"OpenAI Whisper API error: {e.response.status_code}")
+            logger.error(f"Groq Whisper API error: {e.response.status_code}")
             logger.error(f"Response body: {e.response.text}")
             raise
 
@@ -93,14 +94,6 @@ async def download_telegram_file(file_id: str, context: ContextTypes.DEFAULT_TYP
         await tg_file.download_to_drive(tmp.name)
         with open(tmp.name, "rb") as f:
             return f.read()
-
-
-# ─── Определение имени файла ──────────────────────────────────────────────────
-def get_file_name(file_name: str | None, default: str = "audio.ogg") -> str:
-    """Возвращает имя файла с правильным расширением."""
-    if file_name:
-        return file_name
-    return default
 
 
 # ─── Клавиатура выбора языка ──────────────────────────────────────────────────
@@ -124,13 +117,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик команды /start"""
     logger.info(f"Команда /start от {update.effective_user.id}")
     await update.message.reply_text(
-        "🎙 *Бот транскрибации Whisper*\n\n"
+        "🎙 *Бот транскрибации Groq Whisper*\n\n"
         "Отправьте голосовое сообщение, аудио файл, видео или кружок — "
         "и я верну текст.\n\n"
+        "✨ *Полностью БЕСПЛАТНО!*\n\n"
         "Команды:\n"
         "/lang — выбрать язык\n"
         "/start — это сообщение\n\n"
-        "💡 Используется OpenAI Whisper API — лучшее качество!",
+        "💡 Используется Groq Whisper API — быстро и бесплатно!",
         parse_mode="Markdown",
     )
 
@@ -200,7 +194,7 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         audio_bytes = await download_telegram_file(file_id, context)
         logger.info(f"Файл скачан, размер: {len(audio_bytes)} байт")
         
-        text = await transcribe_with_whisper(audio_bytes, file_name, language)
+        text = await transcribe_with_groq(audio_bytes, file_name, language)
 
         # Telegram ограничивает сообщение 4096 символами
         if len(text) <= 4000:
@@ -214,10 +208,10 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         logger.info(f"Успешно транскрибировано {len(text)} символов")
 
     except httpx.HTTPStatusError as e:
-        logger.error(f"OpenAI Whisper API error: {e.response.status_code}")
+        logger.error(f"Groq Whisper API error: {e.response.status_code}")
         logger.error(f"Response: {e.response.text}")
         
-        # Парсим ошибку от OpenAI
+        # Парсим ошибку от Groq
         try:
             error_data = e.response.json()
             error_msg = error_data.get("error", {}).get("message", "Неизвестная ошибка")
@@ -225,7 +219,7 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             error_msg = e.response.text[:200] if e.response.text else "Неизвестная ошибка"
         
         await status_msg.edit_text(
-            f"❌ Ошибка OpenAI Whisper: {e.response.status_code}\n\n`{error_msg}`",
+            f"❌ Ошибка Groq Whisper: {e.response.status_code}\n\n`{error_msg}`",
             parse_mode="Markdown"
         )
     except Exception as e:
@@ -275,7 +269,7 @@ def main() -> None:
     # 4. Обработчик текстовых сообщений (в конце!)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    logger.info("🎙 Бот транскрибации запущен (Whisper API). Polling...")
+    logger.info("🎙 Бот транскрибации запущен (Groq Whisper - БЕСПЛАТНО!). Polling...")
     app.run_polling(drop_pending_updates=True)
 
 
